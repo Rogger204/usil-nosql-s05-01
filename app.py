@@ -12,7 +12,7 @@ st.caption("Consulta el historial de ventas y métodos de compra en MongoDB Atla
 try:
     mongo_uri = st.secrets["mongo"]["uri"]
 except KeyError:
-    st.error("❌ No se encontró el secreto `mongo.uri` en `.streamlit/secrets.toml`")
+    st.error("❌ No se encontró el secreto `mongo.uri` en `.streamlit/secrets.toml`.")
     st.stop()
 
 @st.cache_resource
@@ -21,36 +21,41 @@ def get_client(uri):
 
 try:
     client = get_client(mongo_uri)
-    # CAMBIO: Usando la base de datos y colección de la imagen
     db = client["sample_supplies"]
     col_sales = db["sales"]
     
+    # Test de conexión
     client.admin.command("ping")
     st.sidebar.success("✅ Conectado a sample_supplies.sales")
 except Exception as e:
     st.error(f"❌ Error de conexión: {e}")
     st.stop()
 
-# ─── Filtros de Búsqueda ───
+# ─── Filtros de Búsqueda (Diseño Compacto) ───
 st.markdown("---")
-col1, col2 = st.columns([2, 1])
+# Dividimos en 3 columnas para integrar la cantidad en la misma fila
+col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
-    # Filtro por ubicación de la tienda (Store Location)
     store_location = st.text_input(
-        "📍 Buscar por ubicación de tienda",
-        placeholder="Ej: Denver, Seattle, London, New York"
+        "📍 Ubicación de tienda",
+        placeholder="Ej: Seattle, Denver, London..."
     )
 
 with col2:
-    # Filtro por método de compra
     metodo_compra = st.multiselect(
         "Método de compra",
         ["In store", "Online", "Phone"],
         default=["In store", "Online", "Phone"]
     )
 
-limite = st.slider("Cantidad de registros a mostrar", 5, 100, 20)
+with col3:
+    # Sustituimos la línea del slider por un selector desplegable más integrado
+    limite = st.selectbox(
+        "Registros a mostrar",
+        [5, 10, 20, 50, 100],
+        index=2  # Valor por defecto: 20
+    )
 
 # ─── Construcción de la Query ───
 query = {}
@@ -59,16 +64,15 @@ if store_location:
 if metodo_compra:
     query["purchaseMethod"] = {"$in": metodo_compra}
 
-# Ejecutar consulta
+# Ejecutar consulta en MongoDB
 resultados_raw = list(col_sales.find(query).limit(limite))
 
 if not resultados_raw:
     st.warning("No se encontraron ventas con esos criterios.")
 else:
-    # ─── Procesamiento de Datos para Tabla ───
+    # ─── Procesamiento de Datos para Tabla Principal ───
     datos_tabla = []
     for r in resultados_raw:
-        # Extraer info del cliente (es un objeto anidado)
         customer = r.get("customer", {})
         
         datos_tabla.append({
@@ -78,31 +82,35 @@ else:
             "Método": r.get("purchaseMethod", "—"),
             "Cupón": "✅" if r.get("couponUsed") else "❌",
             "Email Cliente": customer.get("email", "—"),
-            "Edad Cliente": customer.get("age", "—"),
-            "Género": customer.get("gender", "—"),
-            "Satisfacción (1-5)": customer.get("satisfaction", "—"),
+            "Edad": customer.get("age", "—"),
+            "Satisfacción": f"{customer.get('satisfaction', '—')}/5",
             "Items": len(r.get("items", []))
         })
 
     df = pd.DataFrame(datos_tabla)
 
-    # ─── Visualización ───
+    # ─── Visualización de Resultados ───
     st.markdown(f"### 📋 Listado de {len(df)} ventas encontradas")
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # ─── Sección de Detalles (Expansores) ───
+    # ─── Detalle Expandible por Venta ───
     st.markdown("### 📦 Detalle de artículos por venta")
     for i, r in enumerate(resultados_raw):
-        tienda = r.get("storeLocation")
-        metodo = r.get("purchaseMethod")
-        with st.expander(f"Venta {df.iloc[i]['ID Venta']} - {tienda} ({metodo})"):
-            # Mostrar los items de esa venta específica
+        tienda = r.get("storeLocation", "Sin ubicación")
+        metodo = r.get("purchaseMethod", "Sin método")
+        venta_id = df.iloc[i]['ID Venta']
+        
+        with st.expander(f"Venta {venta_id} — {tienda} ({metodo})"):
             items = r.get("items", [])
             if items:
                 df_items = pd.DataFrame(items)
-                # Formatear precios si existen
+                # Formatear la columna de precio a moneda si existe
                 if 'price' in df_items.columns:
+                    # Convertimos a float por si viene como Decimal128 de MongoDB
                     df_items['price'] = df_items['price'].apply(lambda x: f"${float(str(x)):,.2f}")
-                st.table(df_items[['name', 'tags', 'price', 'quantity']])
+                
+                # Reorganizar columnas para mejor lectura
+                columnas_ver = [c for c in ['name', 'quantity', 'price', 'tags'] if c in df_items.columns]
+                st.table(df_items[columnas_ver])
             else:
-                st.write("No hay detalles de artículos.")
+                st.info("Esta venta no contiene artículos registrados.")
