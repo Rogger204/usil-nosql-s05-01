@@ -3,165 +3,106 @@ from pymongo import MongoClient
 import pandas as pd
 
 # ─── Configuración de página ───
-st.set_page_config(page_title="Restaurantes NYC", page_icon="🍽️", layout="wide")
+st.set_page_config(page_title="Explorador de Ventas", page_icon="🛍️", layout="wide")
 
-st.title("🍽️ Restaurantes NYC — Sample Restaurants")
-st.caption("Consulta restaurantes y su neighborhood asociado vía MongoDB Atlas")
+st.title("🛍️ Explorador de Ventas — Sample Supplies")
+st.caption("Consulta el historial de ventas y métodos de compra en MongoDB Atlas")
 
-# ─── Conexión a MongoDB Atlas vía secrets ───
-# Configurado en .streamlit/secrets.toml
+# ─── Conexión a MongoDB Atlas ───
 try:
     mongo_uri = st.secrets["mongo"]["uri"]
 except KeyError:
-    st.error(
-        "❌ No se encontró el secreto `mongo.uri`. "
-        "Crea el archivo `.streamlit/secrets.toml` con:\n\n"
-        "```\n[mongo]\nuri = \"mongodb+srv://usuario:password@cluster.xxxxx.mongodb.net/\"\n```"
-    )
+    st.error("❌ No se encontró el secreto `mongo.uri` en `.streamlit/secrets.toml`")
     st.stop()
 
-with st.sidebar:
-    st.header("🔌 MongoDB Atlas")
-    st.markdown(
-        "**Conexión:** vía `st.secrets`\n\n"
-        "**Requisitos:**\n"
-        "- Dataset `sample_restaurants` cargado\n"
-        "- Índice `2dsphere` en `neighborhoods.geometry`"
-    )
-
-# ─── Conectar ───
 @st.cache_resource
 def get_client(uri):
     return MongoClient(uri)
 
 try:
     client = get_client(mongo_uri)
-    db = client["sample_restaurants"]
-    col_restaurants = db["restaurants"]
-    col_neighborhoods = db["neighborhoods"]
-    # Test de conexión
+    # CAMBIO: Usando la base de datos y colección de la imagen
+    db = client["sample_supplies"]
+    col_sales = db["sales"]
+    
     client.admin.command("ping")
-    st.sidebar.success("✅ Conectado a MongoDB Atlas")
+    st.sidebar.success("✅ Conectado a sample_supplies.sales")
 except Exception as e:
     st.error(f"❌ Error de conexión: {e}")
     st.stop()
 
-# ─── Asegurar índice geoespacial ───
-try:
-    col_neighborhoods.create_index([("geometry", "2dsphere")])
-except Exception:
-    pass
-
-# ─── Búsqueda ───
+# ─── Filtros de Búsqueda ───
 st.markdown("---")
-col1, col2 = st.columns([3, 1])
+col1, col2 = st.columns([2, 1])
 
 with col1:
-    nombre_busqueda = st.text_input(
-        "🔍 Buscar restaurante por nombre",
-        placeholder="Ej: Riviera, Wendy, Morris Park"
+    # Filtro por ubicación de la tienda (Store Location)
+    store_location = st.text_input(
+        "📍 Buscar por ubicación de tienda",
+        placeholder="Ej: Denver, Seattle, London, New York"
     )
 
 with col2:
-    limite = st.selectbox("Resultados máx.", [5, 10, 20, 50], index=1)
+    # Filtro por método de compra
+    metodo_compra = st.multiselect(
+        "Método de compra",
+        ["In store", "Online", "Phone"],
+        default=["In store", "Online", "Phone"]
+    )
 
-if not nombre_busqueda:
-    st.info("Escribe un nombre (o parte del nombre) de un restaurante para buscar.")
-    st.stop()
+limite = st.slider("Cantidad de registros a mostrar", 5, 100, 20)
 
-# ─── Consulta de restaurantes (búsqueda parcial, case-insensitive) ───
-query = {"name": {"$regex": nombre_busqueda, "$options": "i"}}
-restaurantes = list(col_restaurants.find(query).limit(limite))
+# ─── Construcción de la Query ───
+query = {}
+if store_location:
+    query["storeLocation"] = {"$regex": store_location, "$options": "i"}
+if metodo_compra:
+    query["purchaseMethod"] = {"$in": metodo_compra}
 
-if not restaurantes:
-    st.warning(f"No se encontraron restaurantes con el nombre **'{nombre_busqueda}'**.")
-    st.stop()
+# Ejecutar consulta
+resultados_raw = list(col_sales.find(query).limit(limite))
 
-st.success(f"Se encontraron **{len(restaurantes)}** restaurante(s)")
-
-# ─── Función para obtener el neighborhood geoespacialmente ───
-def get_neighborhood(coord):
-    """Dado un [lng, lat], busca en qué neighborhood cae el punto."""
-    if not coord or len(coord) < 2:
-        return "Sin coordenadas"
-    try:
-        result = col_neighborhoods.find_one({
-            "geometry": {
-                "$geoIntersects": {
-                    "$geometry": {
-                        "type": "Point",
-                        "coordinates": coord
-                    }
-                }
-            }
+if not resultados_raw:
+    st.warning("No se encontraron ventas con esos criterios.")
+else:
+    # ─── Procesamiento de Datos para Tabla ───
+    datos_tabla = []
+    for r in resultados_raw:
+        # Extraer info del cliente (es un objeto anidado)
+        customer = r.get("customer", {})
+        
+        datos_tabla.append({
+            "ID Venta": str(r.get("_id")),
+            "Fecha": r.get("saleDate").strftime("%Y-%m-%d") if r.get("saleDate") else "—",
+            "Tienda": r.get("storeLocation", "—"),
+            "Método": r.get("purchaseMethod", "—"),
+            "Cupón": "✅" if r.get("couponUsed") else "❌",
+            "Email Cliente": customer.get("email", "—"),
+            "Edad Cliente": customer.get("age", "—"),
+            "Género": customer.get("gender", "—"),
+            "Satisfacción (1-5)": customer.get("satisfaction", "—"),
+            "Items": len(r.get("items", []))
         })
-        if result:
-            return result.get("name", "Desconocido")
-        return "Fuera de cobertura"
-    except Exception as e:
-        return f"Error: {e}"
 
-# ─── Construir tabla de resultados ───
-resultados = []
-for r in restaurantes:
-    coord = r.get("address", {}).get("coord", [])
-    neighborhood = get_neighborhood(coord)
+    df = pd.DataFrame(datos_tabla)
 
-    # Obtener última calificación
-    grades = r.get("grades", [])
-    ultima_nota = grades[0].get("grade", "N/A") if grades else "N/A"
-    ultimo_score = grades[0].get("score", "N/A") if grades else "N/A"
+    # ─── Visualización ───
+    st.markdown(f"### 📋 Listado de {len(df)} ventas encontradas")
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    resultados.append({
-        "Restaurante": r.get("name", "—"),
-        "Cocina": r.get("cuisine", "—"),
-        "Borough": r.get("borough", "—"),
-        "Neighborhood": neighborhood,
-        "Dirección": f"{r.get('address', {}).get('building', '')} {r.get('address', {}).get('street', '')}".strip(),
-        "Última Nota": ultima_nota,
-        "Último Score": ultimo_score,
-        "Longitud": coord[0] if len(coord) >= 2 else None,
-        "Latitud": coord[1] if len(coord) >= 2 else None,
-    })
-
-df = pd.DataFrame(resultados)
-
-# ─── Mostrar tabla ───
-st.markdown("### 📋 Resultados")
-st.dataframe(df, use_container_width=True, hide_index=True)
-
-# ─── Mapa ───
-df_map = df.dropna(subset=["Latitud", "Longitud"]).copy()
-df_map = df_map.rename(columns={"Latitud": "latitude", "Longitud": "longitude"})
-
-if not df_map.empty:
-    st.markdown("### 🗺️ Ubicación en el mapa")
-    st.map(df_map[["latitude", "longitude"]])
-
-# ─── Detalle expandible por restaurante ───
-st.markdown("### 📝 Detalle por restaurante")
-for i, r in enumerate(restaurantes):
-    nombre = r.get("name", "—")
-    with st.expander(f"**{nombre}** — {r.get('cuisine', '')} ({r.get('borough', '')})"):
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(f"**Neighborhood:** {resultados[i]['Neighborhood']}")
-            st.markdown(f"**Dirección:** {resultados[i]['Dirección']}")
-            st.markdown(f"**Borough:** {r.get('borough', '—')}")
-            st.markdown(f"**Cocina:** {r.get('cuisine', '—')}")
-            st.markdown(f"**Restaurant ID:** {r.get('restaurant_id', '—')}")
-
-        with c2:
-            grades = r.get("grades", [])
-            if grades:
-                st.markdown("**Historial de calificaciones:**")
-                grade_data = []
-                for g in grades[:10]:
-                    grade_data.append({
-                        "Fecha": g.get("date", "").strftime("%Y-%m-%d") if hasattr(g.get("date", ""), "strftime") else str(g.get("date", "")),
-                        "Nota": g.get("grade", "—"),
-                        "Score": g.get("score", "—"),
-                    })
-                st.dataframe(pd.DataFrame(grade_data), hide_index=True)
+    # ─── Sección de Detalles (Expansores) ───
+    st.markdown("### 📦 Detalle de artículos por venta")
+    for i, r in enumerate(resultados_raw):
+        tienda = r.get("storeLocation")
+        metodo = r.get("purchaseMethod")
+        with st.expander(f"Venta {df.iloc[i]['ID Venta']} - {tienda} ({metodo})"):
+            # Mostrar los items de esa venta específica
+            items = r.get("items", [])
+            if items:
+                df_items = pd.DataFrame(items)
+                # Formatear precios si existen
+                if 'price' in df_items.columns:
+                    df_items['price'] = df_items['price'].apply(lambda x: f"${float(str(x)):,.2f}")
+                st.table(df_items[['name', 'tags', 'price', 'quantity']])
             else:
-                st.info("Sin historial de calificaciones")
+                st.write("No hay detalles de artículos.")
